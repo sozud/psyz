@@ -708,13 +708,25 @@ static void spu_tick(short* out) {
     }
 }
 
+static PsyzSpuTap spu_tap;
+static void* spu_tap_user;
+
+void Psyz_SpuSetTap(PsyzSpuTap tap, void* user) {
+    spu_tap_user = user;
+    spu_tap = tap;
+}
+
 void Psyz_SpuPullSamples(short* out, int num_frames) {
     if (!spu.initialized) {
         memset(out, 0, num_frames * 2 * sizeof(short));
-        return;
+    } else {
+        Psyz_RcntAdd(num_frames);
+        for (int i = 0; i < num_frames; i++) {
+            spu_tick(&out[i * 2]);
+        }
     }
-    Psyz_RcntAdd(num_frames);
-    for (int i = 0; i < num_frames; i++) {
-        spu_tick(&out[i * 2]);
+    PsyzSpuTap tap = spu_tap;
+    if (tap) {
+        tap(out, num_frames, spu_tap_user);
     }
 }

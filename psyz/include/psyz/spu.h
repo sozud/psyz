@@ -139,6 +139,27 @@ unsigned char* Psyz_SpuGetRam(void);
  */
 void Psyz_SpuPullSamples(short* out, int num_frames);
 
+/**
+ * @brief Callback handed a copy of every batch Psyz_SpuPullSamples produces
+ *
+ * @param frames Interleaved stereo 16-bit LE PCM frames
+ * @param num_frames Number of stereo frames
+ * @param user Opaque pointer passed to Psyz_SpuSetTap
+ */
+typedef void (*PsyzSpuTap)(const short* frames, int num_frames, void* user);
+
+/**
+ * @brief Install a tap that observes the generated samples
+ *
+ * For recording and analysis; the tap cannot alter the samples that are played.
+ * It runs on whichever thread pulls samples, which is the host audio callback
+ * thread for the SDL backend, so it must not block or touch SPU state.
+ *
+ * @param tap Tap to install, or NULL to remove the current one
+ * @param user Opaque pointer passed back to the tap
+ */
+void Psyz_SpuSetTap(PsyzSpuTap tap, void* user);
+
 #ifdef __cplusplus
 }
 #endif
