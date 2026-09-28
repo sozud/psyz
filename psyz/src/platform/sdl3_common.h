@@ -198,6 +198,7 @@ static PsyzDitherMode dither_mode = PSYZ_DITHER_AUTO;
 static bool use_driver_vsync = false;
 static PsyzVideoStats gpu_stats = {0};
 
+#ifndef SDL3_COMMON_CUSTOM_DRAW_STATE
 static unsigned draw_grid_source_width = 1;
 static unsigned draw_grid_target_width = 1;
 
@@ -219,6 +220,7 @@ int Draw_SetHorizontalGrid(
     draw_grid_target_width = target_width;
     return 0;
 }
+#endif
 
 static void PollEvents(void);
 
@@ -941,6 +943,7 @@ static void PollEvents(void) {
 #endif
 }
 
+#ifndef SDL3_COMMON_CUSTOM_DRAW_STATE
 typedef struct {
     short x, y;
     unsigned short u, v, c, t;
@@ -1096,5 +1099,6 @@ void Draw_SetMask(int bit0, int bit1) {
         NOT_IMPLEMENTED;
     }
 }
+#endif
 
 #endif // SDL3_COMMON_H

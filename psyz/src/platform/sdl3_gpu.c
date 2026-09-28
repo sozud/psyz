@@ -100,6 +100,16 @@ PsyzOverlayRenderCB_SDL3GPU Psyz_OverlayRender_SDL3GPU(
     return prev;
 }
 
+static PsyzOverlayPrepareCB_SDL3GPU overlay_prepare_cb;
+static SDL_Rect overlay_game_rect;
+PsyzOverlayPrepareCB_SDL3GPU Psyz_OverlayPrepare_SDL3GPU(
+    PsyzOverlayPrepareCB_SDL3GPU cb) {
+    const PsyzOverlayPrepareCB_SDL3GPU prev = overlay_prepare_cb;
+    overlay_prepare_cb = cb;
+    return prev;
+}
+SDL_Rect Psyz_OverlayGameRect_SDL3GPU(void) { return overlay_game_rect; }
+
 static SDL_GPUCommandBuffer* AcquireCmd(void) {
     if (!pending_cmd) {
         pending_cmd = SDL_AcquireGPUCommandBuffer(device);
@@ -648,6 +658,7 @@ static void PlatformBackend_Present(void) {
             WARNF("SDL_WaitAndAcquireGPUSwapchainTexture: %s", SDL_GetError());
         }
         if (swapchain) {
+            overlay_game_rect = (SDL_Rect){0, 0, 0, 0};
             if (!disp_on) {
                 const SDL_GPUColorTargetInfo blank_target = {
                     .texture = swapchain,
@@ -679,6 +690,7 @@ static void PlatformBackend_Present(void) {
 
                 WndSize win = {(int)sc_w, (int)sc_h};
                 SDL_Rect dst = FitGameToWindow(game_aspect, win);
+                overlay_game_rect = dst;
 
                 const SDL_GPUBlitInfo blit = {
                     .source = src,
@@ -700,6 +712,9 @@ static void PlatformBackend_Present(void) {
             }
             if (overlay_frame_cb) {
                 overlay_frame_cb();
+            }
+            if (overlay_prepare_cb) {
+                overlay_prepare_cb(cmd);
             }
             if (overlay_render_cb) {
                 SDL_GPUColorTargetInfo target = {

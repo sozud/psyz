@@ -19,6 +19,17 @@ typedef void (*PsyzOverlayInitCB_SDL3GPU)(
 typedef void (*PsyzOverlayRenderCB_SDL3GPU)(
     SDL_GPUCommandBuffer* cmd, SDL_GPURenderPass* pass);
 
+// Called after the game blit and before the overlay render pass. GPU upload
+// work (including ImGui's PrepareDrawData) belongs here.
+typedef void (*PsyzOverlayPrepareCB_SDL3GPU)(SDL_GPUCommandBuffer* cmd);
+
+PsyzOverlayPrepareCB_SDL3GPU Psyz_OverlayPrepare_SDL3GPU(
+    PsyzOverlayPrepareCB_SDL3GPU cb);
+
+// Pixel rectangle occupied by the displayed game, excluding letterboxing.
+// Valid during overlay callbacks and after the first presented frame.
+SDL_Rect Psyz_OverlayGameRect_SDL3GPU(void);
+
 // Register the SDL3+SDL_GPU initialization callback.
 // Returns the previous callback, or NULL if none was set.
 PsyzOverlayInitCB_SDL3GPU Psyz_OverlayInit_SDL3GPU(
