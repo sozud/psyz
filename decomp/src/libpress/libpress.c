@@ -112,6 +112,7 @@ DecDCCb DecDCToutCallback(DecDCCb cb) { return DMACallback(1, cb); }
 int DecDCTinCallback(void (*cb)()) { return DMACallback(0, cb); }
 int DecDCToutCallback(void (*cb)()) { return DMACallback(1, cb); }
 #endif
+#ifndef __psyz
 void MDEC_reset(int mode) {
     switch (mode) {
     case 0:
@@ -199,3 +200,4 @@ int timeout(char* name) {
     *mdec1 = 0x60000000;
     return 0;
 }
+#endif
