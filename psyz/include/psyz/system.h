@@ -11,7 +11,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <fcntl.h>
-#ifndef _WIN32
+#ifdef _WIN32
+#include <io.h> // declare the CRT names before they are renamed below
+#else
 #include <unistd.h>
 #endif
 #endif
