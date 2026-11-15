@@ -65,6 +65,37 @@ size_t Psyz_CdPullSamples(short* out, size_t num_frames);
  */
 void Psyz_CdSetReadCB(PsyzCdReadCB cb);
 
+/**
+ * @brief Callback that replaces the CD audio stream
+ *
+ * Called from the audio thread with the audio lock held. Return a negative
+ * value to keep the emulated CD audio. Otherwise write up to num_frames
+ * interleaved stereo frames and return how many were written; CdMix
+ * attenuation is applied afterwards. CD reads still advance while the stream
+ * is replaced.
+ */
+typedef long (*PsyzCdAudioOverrideCB)(short* out, size_t num_frames);
+
+/**
+ * @brief Set or clear (NULL) the CD audio override callback
+ */
+void Psyz_CdSetAudioOverride(PsyzCdAudioOverrideCB cb);
+
+/**
+ * @brief Callback that may supply raw sectors in place of the disc image
+ *
+ * Called for data reads and for the CD-DA/XA stream, from the game thread or
+ * the audio thread with the audio lock held. Write PSYZ_DISC_SECTOR_SIZE
+ * bytes and return 0 to supply the sector, or return -1 to read the disc.
+ * Sectors past the end of the disc may be supplied this way.
+ */
+typedef int (*PsyzCdSectorCB)(int sector, unsigned char* out);
+
+/**
+ * @brief Set or clear (NULL) the sector overlay callback
+ */
+void Psyz_CdSetSectorOverlay(PsyzCdSectorCB cb);
+
 #ifdef __cplusplus
 }
 #endif

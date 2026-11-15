@@ -1,6 +1,7 @@
 #include <psyz.h>
 #include <libetc.h>
 #include <libcd.h>
+#include <psyz/disc.h>
 #include <psyz/log.h>
 #include <inttypes.h>
 #include <stdio.h>
@@ -11,27 +12,7 @@
 #include "../internal.h"
 #include "../../decomp/src/libspu/libspu_private.h"
 
-#define SECTOR_SIZE 2352
-#define MAX_TRACKS 99
-#define MAX_PATH_LEN 512
-
-// Track types
-typedef enum {
-    TRACK_AUDIO,
-    TRACK_MODE1_2352,
-    TRACK_MODE2_2352,
-    TRACK_UNKNOWN
-} TrackType;
-
-// Track entry from CUE file
-typedef struct {
-    char file_path[MAX_PATH_LEN];
-    int start_sector; // MSF sector offset within the file
-    int abs_sector;   // Absolute sector position on the "virtual CD"
-    int track_num;
-    TrackType type;
-    int is_valid;
-} TrackEntry;
+#define SECTOR_SIZE PSYZ_DISC_SECTOR_SIZE
 
 // https://www.problemkaputt.de/psx-spx.htm#cdromcontrollerioports
 typedef struct {
@@ -46,10 +27,8 @@ typedef struct {
     u_char emphasis;        // 0=Off, 1=Emphasis
 } CdContext;
 
-// Global CUE data storage
-static TrackEntry g_tracks[MAX_TRACKS];
-static int g_track_count = 0;
-static char g_cue_base_path[MAX_PATH_LEN];
+// The loaded disc image
+static PsyzDisc* g_disc;
 
 char* CD_comstr[] = {
     "CdlSync",    "CdlNop",
@@ -125,198 +104,6 @@ static short clamp16(int v) {
     return (short)v;
 }
 
-// Trim whitespace from both ends of a string
-static char* str_trim(char* str) {
-    char* end;
-    while (isspace((unsigned char)*str)) {
-        str++;
-    }
-    if (*str == 0) {
-        return str;
-    }
-    end = str + strlen(str) - 1;
-    while (end > str && isspace((unsigned char)*end)) {
-        end--;
-    }
-    end[1] = '\0';
-    return str;
-}
-
-// Extract quoted string or unquoted token
-static char* extract_token(char* str, char* dest, int max_len) {
-    char* p = str;
-    int len = 0;
-
-    // Skip leading whitespace
-    while (*p && isspace((unsigned char)*p)) {
-        p++;
-    }
-    if (*p == '"') {
-        // Quoted string
-        p++;
-        while (*p && *p != '"' && len < max_len - 1) {
-            dest[len++] = *p++;
-        }
-        if (*p == '"') {
-            p++;
-        }
-    } else {
-        // Unquoted token (up to space)
-        while (*p && !isspace((unsigned char)*p) && len < max_len - 1) {
-            dest[len++] = *p++;
-        }
-    }
-    dest[len] = '\0';
-    return p;
-}
-
-// Get file size in sectors
-static int get_file_size_in_sectors(const char* file_path) {
-    FILE* fp = fopen(file_path, "rb");
-    if (!fp) {
-        WARNF("Failed to open file for size calculation: %s", file_path);
-        return 0;
-    }
-
-    fseek(fp, 0, SEEK_END);
-    long file_size = ftell(fp);
-    fclose(fp);
-
-    if (file_size < 0) {
-        WARNF("Failed to get file size: %s", file_path);
-        return 0;
-    }
-
-    // Convert bytes to sectors (rounded up)
-    return (int)((file_size + SECTOR_SIZE - 1) / SECTOR_SIZE);
-}
-
-// Parse a CUE file and populate the global track table
-static int parse_cue_file(const char* cue_path) {
-    FILE* fp = fopen(cue_path, "r");
-    if (!fp) {
-        ERRORF("error opening CUE file %s", cue_path);
-        return -1;
-    }
-
-    // Extract base directory from CUE path for resolving relative file paths
-    const char* last_slash = strrchr(cue_path, '/');
-    if (!last_slash) {
-        last_slash = strrchr(cue_path, '\\');
-    }
-    if (last_slash) {
-        unsigned int len = (unsigned int)(last_slash - cue_path + 1);
-        if (len >= MAX_PATH_LEN) {
-            len = MAX_PATH_LEN - 1;
-        }
-        strncpy(g_cue_base_path, cue_path, len);
-        g_cue_base_path[len] = '\0';
-    } else {
-        g_cue_base_path[0] = '\0';
-    }
-
-    char full_line[1024];
-    char current_file[MAX_PATH_LEN] = {0};
-    char current_file_full_path[MAX_PATH_LEN] = {0};
-    int current_track = -1;
-    int current_file_abs_sector =
-        0; // Absolute sector where current file starts
-
-    g_track_count = 0;
-    while (fgets(full_line, sizeof(full_line), fp)) {
-        char* line = str_trim(full_line);
-        if (strncmp(line, "FILE", 4) == 0) {
-            // Before switching to new file, calculate size of previous file
-            if (current_file[0] != '\0') {
-                int prev_file_size =
-                    get_file_size_in_sectors(current_file_full_path);
-                current_file_abs_sector += prev_file_size;
-            }
-
-            char* p = line + 4;
-            extract_token(p, current_file, MAX_PATH_LEN);
-
-            // Build full path for the new file
-            if (current_file[0] == '/' || current_file[0] == '\\' ||
-                (current_file[0] != '\0' && current_file[1] == ':')) {
-                // Absolute path
-                strncpy(current_file_full_path, current_file, MAX_PATH_LEN - 1);
-            } else {
-                // Relative path - prepend base directory
-                snprintf(current_file_full_path, MAX_PATH_LEN, "%s%s",
-                         g_cue_base_path, current_file);
-            }
-        } else if (strncmp(line, "TRACK", 5) == 0) {
-            int track_num = 1;
-            char type_str[64];
-            if (sscanf(line, "TRACK %d %63s", &track_num, type_str) == 2) {
-                if (track_num < 1 || track_num > MAX_TRACKS) {
-                    ERRORF("Invalid track number: %d", track_num);
-                    continue;
-                }
-
-                current_track = track_num - 1;
-                TrackEntry* track = &g_tracks[current_track];
-                track->track_num = track_num;
-                track->is_valid = 1;
-                track->start_sector = 0; // Will be set by INDEX 01
-                track->abs_sector =
-                    0; // Will be calculated when INDEX 01 is parsed
-
-                // Store file path
-                strncpy(
-                    track->file_path, current_file_full_path, MAX_PATH_LEN - 1);
-
-                if (strcmp(type_str, "AUDIO") == 0) {
-                    track->type = TRACK_AUDIO;
-                } else if (strcmp(type_str, "MODE1/2352") == 0) {
-                    track->type = TRACK_MODE1_2352;
-                } else if (strcmp(type_str, "MODE2/2352") == 0) {
-                    track->type = TRACK_MODE2_2352;
-                } else {
-                    track->type = TRACK_UNKNOWN;
-                    DEBUGF("Unknown track type: %s", type_str);
-                }
-
-                if (track_num > g_track_count) {
-                    g_track_count = track_num;
-                }
-            }
-        } else if (strncmp(line, "INDEX", 5) == 0) {
-            if (current_track < 0) {
-                ERRORF("INDEX found before TRACK");
-                continue;
-            }
-            int index_num;
-            char msf_str[32];
-            if (sscanf(line, "INDEX %d %31s", &index_num, msf_str) == 2) {
-                int minute = 0, second = 0, frame = 0;
-                if (sscanf(msf_str, "%d:%d:%d", &minute, &second, &frame) ==
-                    3) {
-                    int sector = minute * 60 * 75 + second * 75 + frame;
-                    if (index_num == 1) { // INDEX 01 is the track data
-                        TrackEntry* track = &g_tracks[current_track];
-                        track->start_sector = sector;
-                        track->abs_sector = current_file_abs_sector + sector;
-                        DEBUGF("Track %02d: %s at sector %d", track->track_num,
-                               track->file_path, track->abs_sector);
-                    }
-                }
-            }
-        } else {
-            WARNF("CUE line not recognized: %s", line);
-        }
-    }
-    fclose(fp);
-
-    if (g_track_count == 0) {
-        ERRORF("No valid tracks found in CUE file");
-        return -1;
-    }
-    DEBUGF("Parsed CUE file: %d tracks", g_track_count);
-    return 0;
-}
-
 // Number of bytes CD_cw writes for the short status-style responses.
 #define CD_STATUS_RESULT_LEN 4
 
@@ -344,15 +131,8 @@ static int data_sector_valid = 0;
 static int data_sector_number = 0;
 static int data_getsector_count = 0;
 
-// Compute the absolute sector of the disc lead-out, used by CdlGetTD with
-// param = 0x00. Equals the absolute sector where the last track's file ends.
-static int lead_out_sector(void) {
-    if (g_track_count == 0) {
-        return 0;
-    }
-    TrackEntry* last = &g_tracks[g_track_count - 1];
-    return last->abs_sector + get_file_size_in_sectors(last->file_path);
-}
+// Absolute sector of the disc lead-out, used by CdlGetTD with param = 0x00.
+static int lead_out_sector(void) { return Psyz_DiscLeadOut(g_disc); }
 
 // 1 = disc lid is open, 0 = lid closed
 static int shell_is_open = 0;
@@ -370,17 +150,24 @@ void Psyz_CdShellOpen(int is_open) {
 static void close_track_file(void);
 
 int Psyz_CdSetDiskPath(const char* diskPath) {
+    Psyz_AudioLock();
     close_track_file();
     is_disk_loaded = 0;
-    g_track_count = 0;
-    memset(g_tracks, 0, sizeof(g_tracks));
+    Psyz_DiscClose(g_disc);
+    g_disc = NULL;
+    Psyz_AudioUnlock();
     if (!diskPath) {
         DEBUGF("Disk path unset");
         return 0;
     }
-    if (parse_cue_file(diskPath) < 0) {
+    PsyzDisc* disc = Psyz_DiscOpen(diskPath);
+    if (!disc) {
+        ERRORF("cannot load disc image: %s", Psyz_DiscLastError());
         return -1;
     }
+    Psyz_AudioLock();
+    g_disc = disc;
+    Psyz_AudioUnlock();
     is_disk_loaded = 1;
     DEBUGF("Disk path set: %s", diskPath);
     return 0;
@@ -389,21 +176,38 @@ int Psyz_CdSetDiskPath(const char* diskPath) {
 static PsyzCdReadCB disk_read_cb = NULL;
 void Psyz_CdSetReadCB(PsyzCdReadCB cb) { disk_read_cb = cb; }
 
+static PsyzCdSectorCB sector_overlay = NULL;
+void Psyz_CdSetSectorOverlay(PsyzCdSectorCB cb) {
+    Psyz_AudioLock();
+    sector_overlay = cb;
+    Psyz_AudioUnlock();
+}
+
+// One raw sector from the overlay, else from the disc image.
+static int read_any_sector(int sector, u_char* out) {
+    if (sector_overlay && sector_overlay(sector, out) == 0) {
+        return 0;
+    }
+    return Psyz_DiscReadSector(g_disc, sector, out);
+}
+
 #define N_CHANNELS 2
 #define SAMPLE_SIZE sizeof(short)
-#define SECTOR_SIZE 2352
 #define BUFFER_SECTORS 8 // Read 8 sectors at a time
 #define CD_BUF_FRAMES                                                          \
     (SECTOR_SIZE * BUFFER_SECTORS / (N_CHANNELS * SAMPLE_SIZE))
-static FILE* track_file;
-static const TrackEntry* track_file_track;
+// Next sector of the CD-DA or XA stream, or -1 when no stream is open.
+static int stream_sector = -1;
 
-static void close_track_file(void) {
-    if (track_file) {
-        fclose(track_file);
-        track_file = NULL;
+static void close_track_file(void) { stream_sector = -1; }
+
+// Reads the next stream sector; returns 0 at the end of the disc.
+static int read_stream_sector(u_char* out) {
+    if (stream_sector < 0 || read_any_sector(stream_sector, out) != 0) {
+        return 0;
     }
-    track_file_track = NULL;
+    stream_sector++;
+    return 1;
 }
 static s16 cd_buf[CD_BUF_FRAMES * N_CHANNELS];
 static size_t cd_buf_pos = 0;   // current read position (in frames)
@@ -418,13 +222,17 @@ static size_t cdda_pull_samples(short* buf, size_t max_frames) {
     size_t written = 0;
     int hit_eof = 0;
     Psyz_AudioLock();
-    if (!is_playing || !track_file) {
+    if (!is_playing || stream_sector < 0) {
         goto end;
     }
     while (written < max_frames) {
         // Refill file read buffer if consumed
         if (cd_buf_pos >= cd_buf_count) {
-            size_t nRead = fread(cd_buf, 1, sizeof(cd_buf), track_file);
+            size_t nRead = 0;
+            while (nRead < sizeof(cd_buf) &&
+                   read_stream_sector((u_char*)cd_buf + nRead)) {
+                nRead += SECTOR_SIZE;
+            }
             if (nRead > 0) {
                 cd_buf_count = (int)(nRead / (N_CHANNELS * SAMPLE_SIZE));
                 cd_buf_pos = 0;
@@ -558,9 +366,8 @@ static int xa_decode_user_mono_4bit(const unsigned char* user) {
 static int xa_read_and_decode_sector(void) {
     unsigned char sector[SECTOR_SIZE];
     while (1) {
-        const size_t n = fread(sector, 1, SECTOR_SIZE, track_file);
-        if (n != SECTOR_SIZE) {
-            return 0; // EOF or short read
+        if (!read_stream_sector(sector)) {
+            return 0; // end of disc or read error
         }
         xa.cur_abs_sector++;
         const unsigned char file = sector[0x10];
@@ -635,7 +442,7 @@ static size_t xa_pull_samples(short* buf, size_t max_frames) {
     size_t written = 0;
     int hit_eof = 0;
     Psyz_AudioLock();
-    if (!is_playing || !track_file || !xa.active) {
+    if (!is_playing || stream_sector < 0 || !xa.active) {
         goto end;
     }
     // Prime Hermite ring on first call so we have y0..y2 valid.
@@ -681,14 +488,28 @@ end:
     return written;
 }
 
+static PsyzCdAudioOverrideCB audio_override_cb = NULL;
+void Psyz_CdSetAudioOverride(PsyzCdAudioOverrideCB cb) {
+    Psyz_AudioLock();
+    audio_override_cb = cb;
+    Psyz_AudioUnlock();
+}
+
 size_t Psyz_CdPullSamples(short* out, size_t num_frames) {
     size_t read_frames;
+    long override_frames;
     if (CD_mode & CdlModeDA) {
         read_frames = cdda_pull_samples(out, num_frames);
     } else if (CD_mode & CdlModeRT) {
         read_frames = xa_pull_samples(out, num_frames);
     } else {
         read_frames = 0;
+    }
+    if (audio_override_cb) {
+        override_frames = audio_override_cb(out, num_frames);
+        if (override_frames >= 0) {
+            read_frames = (size_t)override_frames;
+        }
     }
     if (!enable_passthrough) {
         for (size_t i = 0; i < read_frames; i++) {
@@ -703,75 +524,24 @@ size_t Psyz_CdPullSamples(short* out, size_t num_frames) {
     return read_frames;
 }
 
-// Open the track containing the absolute sector encoded in CD_pos. Closes
-// any previously-open track_file. Returns 0 on success, -1 on failure.
-static TrackEntry* find_track_for_sector(int sector) {
-    for (int i = 0; i < g_track_count; i++) {
-        if (!g_tracks[i].is_valid) {
-            continue;
-        }
-        int next_abs_sector = INT_MAX;
-        if (i + 1 < g_track_count && g_tracks[i + 1].is_valid) {
-            next_abs_sector = g_tracks[i + 1].abs_sector;
-        }
-        if (sector >= g_tracks[i].abs_sector && sector < next_abs_sector) {
-            return &g_tracks[i];
-        }
-    }
-    return NULL;
-}
-
+// Start the CD-DA/XA stream at the absolute sector encoded in CD_pos.
+// Returns 0 on success, -1 on failure.
 static int open_track_at_cd_pos(void) {
     int sector = CdPosToInt(&CD_pos);
-    TrackEntry* track = find_track_for_sector(sector);
-    if (!track) {
+    u_char probe[SECTOR_SIZE];
+    if (!Psyz_DiscFindTrack(g_disc, sector) &&
+        !(sector_overlay && sector_overlay(sector, probe) == 0)) {
         WARNF("no track found for sector %d", sector);
         return -1;
     }
-    close_track_file();
-    FILE* file = fopen(track->file_path, "rb");
-    if (!file) {
-        ERRORF("failed to open audio file: %s", track->file_path);
-        return -1;
-    }
-    int sector_offset = sector - track->abs_sector;
-    sector_offset += track->start_sector;
-    long byte_offset = (long)sector_offset * SECTOR_SIZE;
-    if (fseek(file, byte_offset, SEEK_SET) != 0) {
-        ERRORF("failed to seek to sector %d in %s", sector, track->file_path);
-        fclose(file);
-        return -1;
-    }
-    DEBUGF("opened track %s at sector %d (offset %d)", track->file_path, sector,
-           sector_offset);
-    track_file = file;
-    track_file_track = track;
+    stream_sector = sector;
+    DEBUGF("stream opened at sector %d", sector);
     return 0;
 }
 
 static int read_raw_sector(int sector, u_char* out) {
-    TrackEntry* track = find_track_for_sector(sector);
-    if (!track) {
-        return -1;
-    }
     Psyz_AudioLock();
-    if (track != track_file_track || !track_file) {
-        close_track_file();
-        track_file = fopen(track->file_path, "rb");
-        if (!track_file) {
-            ERRORF("failed to open data file: %s", track->file_path);
-            Psyz_AudioUnlock();
-            return -1;
-        }
-        track_file_track = track;
-    }
-    long offset =
-        (long)(sector - track->abs_sector + track->start_sector) * SECTOR_SIZE;
-    int result = -1;
-    if (fseek(track_file, offset, SEEK_SET) == 0 &&
-        fread(out, 1, SECTOR_SIZE, track_file) == SECTOR_SIZE) {
-        result = 0;
-    }
+    int result = read_any_sector(sector, out);
     Psyz_AudioUnlock();
     return result;
 }
@@ -1102,7 +872,8 @@ int CD_cw(u_char com, u_char* param, u_char* result, s32 arg3) {
             ERRORF("%s got NULL result", CD_comstr[com]);
             return -2;
         }
-        if (shell_is_open || !is_disk_loaded || g_track_count == 0) {
+        if (shell_is_open || !is_disk_loaded ||
+            Psyz_DiscTrackCount(g_disc) == 0) {
             result[0] = (u_char)(CD_status | CdlStatError);
             result[1] = 0x80; // error-response sentinel
             result[2] = 0x00;
@@ -1111,8 +882,9 @@ int CD_cw(u_char com, u_char* param, u_char* result, s32 arg3) {
             return -1;
         }
         result[0] = (u_char)CD_status;
-        result[1] = itob(1);
-        result[2] = itob(g_track_count);
+        result[1] = itob(Psyz_DiscGetTrack(g_disc, 0)->number);
+        result[2] = itob(
+            Psyz_DiscGetTrack(g_disc, Psyz_DiscTrackCount(g_disc) - 1)->number);
         result[3] = 0x00;
         cache_last_result(result, CD_STATUS_RESULT_LEN, CdlComplete);
         break;
@@ -1121,7 +893,8 @@ int CD_cw(u_char com, u_char* param, u_char* result, s32 arg3) {
             ERRORF("%s got NULL param/result", CD_comstr[com]);
             return -2;
         }
-        if (shell_is_open || !is_disk_loaded || g_track_count == 0) {
+        if (shell_is_open || !is_disk_loaded ||
+            Psyz_DiscTrackCount(g_disc) == 0) {
             result[0] = (u_char)(CD_status | CdlStatError);
             result[1] = 0x80;
             result[2] = 0x00;
@@ -1130,10 +903,15 @@ int CD_cw(u_char com, u_char* param, u_char* result, s32 arg3) {
             return -1;
         }
         t = btoi(param[0]);
-        abs_sector;
+        const PsyzDiscTrack* track = NULL;
+        for (int i = 0; t != 0 && i < Psyz_DiscTrackCount(g_disc); i++) {
+            if (Psyz_DiscGetTrack(g_disc, i)->number == t) {
+                track = Psyz_DiscGetTrack(g_disc, i);
+            }
+        }
         if (t == 0) {
             abs_sector = lead_out_sector();
-        } else if (t < 1 || t > g_track_count || !g_tracks[t - 1].is_valid) {
+        } else if (!track) {
             result[0] = (u_char)(CD_status | CdlStatError);
             result[1] = 0x80;
             result[2] = 0x00;
@@ -1141,7 +919,7 @@ int CD_cw(u_char com, u_char* param, u_char* result, s32 arg3) {
             cache_last_result(result, CD_STATUS_RESULT_LEN, CdlDiskError);
             return -1;
         } else {
-            abs_sector = g_tracks[t - 1].abs_sector;
+            abs_sector = track->start;
         }
         // The +150 lead-in pregap is part of the controller-reported MSF.
         total = abs_sector + 150;

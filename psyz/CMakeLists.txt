@@ -22,6 +22,7 @@ if(NOT PSP)
 endif()
 
 option(GTE_USE_HW_SQRT "Use hardware-accelerated sqrt (C math library)" OFF)
+option(PSYZ_CHD "Read .chd disc images (fetches libchdr)" ON)
 
 set(PSYZ_SOURCES
     src/platform/psyz.c
@@ -41,6 +42,7 @@ set(PSYZ_SOURCES
     ../decomp/src/libgte/ratan.c
     src/psyz/libgte.c
     src/psyz/libgs.c
+    src/psyz/disc.c
     src/psyz/libcd.c
     ../decomp/src/libcd/iso9660.c
     ../decomp/src/libcd/sys.c
@@ -290,3 +292,13 @@ else()
     target_link_libraries(psyz PUBLIC SDL3::SDL3 ${PSYZ_LIBS})
 endif()
 psyz_strip_file_prefix(psyz BASE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/..)
+if(PSYZ_CHD)
+    include(FetchContent)
+    set(CHDR_WANT_TESTS OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(libchdr
+        GIT_REPOSITORY https://github.com/rtissera/libchdr.git
+        GIT_TAG 47d794151b2b64f6aba60304e6480f4f5a2bc24b)
+    FetchContent_MakeAvailable(libchdr)
+    target_link_libraries(psyz PRIVATE chdr-static)
+    target_compile_definitions(psyz PRIVATE PSYZ_CHD=1)
+endif()
