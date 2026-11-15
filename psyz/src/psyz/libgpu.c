@@ -28,7 +28,7 @@ static void GPU_write_image() { NOT_IMPLEMENTED; }
 static void GPU_read_image() { NOT_IMPLEMENTED; }
 
 static int queue_len = 0;
-static u_long queue_buf[0x4000];
+static u_long queue_buf[0x10000];
 
 typedef struct {
     PsyzGpuCommandHandler handler;
@@ -168,8 +168,19 @@ static void GPU_Enqueue(u_long* packets) {
             if (env->len > 0x100) {
                 ERRORF("packet 0x%X long, likely corrupted", env->len);
             }
-            INFOF("GPU queue full, calling exeque");
-            Psyz_GpuExeque();
+            if (queue_len > 0) {
+                // Flush, then queue this packet again: falling through would
+                // count it without copying it and replay stale words.
+                INFOF("GPU queue full, calling exeque");
+                Psyz_GpuExeque();
+                continue;
+            }
+            ERRORF("packet 0x%X longer than the GPU queue, dropped", env->len);
+            if (isendprim(env)) {
+                break;
+            }
+            env = (DR_ENV*)nextPrim(env);
+            continue;
         } else if (sizeof(u_long) == 8) {
             // Wow okay, this part is uuuugly...
             // Gpu code is usually written to a u_long array, which will work
